@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kdd27-urr"
+version = "0.1.0"
+description = "URR Stage 1a SID alignment and Stage 1b point-plan training"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26,<3",
+  "PyYAML>=6.0,<7",
+  "safetensors>=0.4",
+  "torch>=2.6,<2.7",
+  "tqdm>=4.66",
+  "transformers>=4.57,<5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.9"]
+
+[tool.setuptools.packages.find]
+include = ["urr*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
