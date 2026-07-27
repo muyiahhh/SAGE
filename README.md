@@ -166,7 +166,3 @@ and DSA/HPP forward and gradient diagnostics using a small synthetic model.
   reranking.
 - The reference launcher uses the training prompt wording during evaluation,
   matching the paper protocol.
-- Raw datasets and pretrained model checkpoints are not redistributed.
-
-This repository is prepared for anonymous review and intentionally contains no
-author or institutional metadata.
