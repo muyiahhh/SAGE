@@ -1,13 +1,6 @@
 # Optional upstream data preparation
 
-This directory preserves the data-preparation code distributed with the GRRM
-pipeline. It provides a path from raw Amazon review data to the processed
-metadata, interactions, and residual-quantized SIDs expected by SAGE.
-
-The SAGE experiments in the paper use the already processed data release, so
-this directory is **not part of the default reproduction path**. The code is
-included for completeness and for users who need to rebuild the data from raw
-Amazon files.
+This directory preserves the data-preparation code. 
 
 ## Scope and provenance
 
