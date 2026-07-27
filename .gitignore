@@ -4,15 +4,29 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+.env
+.env.*
+.DS_Store
+.idea/
+.vscode/
+build/
+dist/
 
-/data/
+/data/*
+!/data/README.md
 /outputs/
 /checkpoints/
 /logs/
 /wandb/
+*.log
 
 *.pt
 *.pth
 *.bin
 *.safetensors
 *.safetensors.index.json
+
+# Raw/intermediate files created by the optional upstream preprocessing code.
+/data_process/data/
+/data_process/output/
+/data_process/outputs/

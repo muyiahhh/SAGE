@@ -1,0 +1,10 @@
+datasets>=2.18
+httpx>=0.27
+k-means-constrained>=0.7
+numpy>=1.26
+openai>=1.30
+polars>=0.20
+scikit-learn>=1.4
+torch>=2.6
+tqdm>=4.66
+transformers>=4.57,<5

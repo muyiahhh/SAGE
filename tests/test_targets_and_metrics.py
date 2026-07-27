@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from urr.eval.calc import calc_metrics
-from urr.train.build_stage1b_targets import extract_sid_codes
+from sage.eval.calc import calc_metrics
+from sage.train.build_anchor_bank import extract_sid_codes
 
 
 def test_extract_sid_codes_accepts_collision_token():

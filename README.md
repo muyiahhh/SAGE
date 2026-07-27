@@ -1,86 +1,62 @@
-# URR
+# SAGE
 
-This repository contains the compact implementation used for the URR method:
+Official implementation of **SAGE**, a representation-space training framework
+for SID-based generative recommendation.
 
-1. **Stage 1a, SID alignment.** Add hierarchical SID tokens to a frozen LLM and
-   align the SID-path representation with an EMA item-text representation.
-2. **Stage 1b, recommendation.** Unfreeze the aligned LLM and train it with
-   recommendation cross entropy plus the **point** and **plan** objectives.
-3. **Evaluation.** Generate 50 constrained beams using the MiniOneRec-style
-   train prompt and report HR/NDCG at 1, 3, 5, 10, 20, and 50.
+SAGE has two training components:
 
-The included configuration reproduces the selected Qwen3-0.6B setting on the
-Amazon Beauty data. Model checkpoints and datasets are intentionally excluded.
+1. **Item-level Semantic Grounding (ISG)** treats an item's SID sequence and
+   text as two views of the same item. A frozen LLM learns grounded SID-token
+   embeddings through joint-embedding predictive alignment.
+2. **Generation-time Semantic Anchoring (GSA)** fine-tunes the recommender with
+   next-token cross-entropy and two training-only objectives. Decision-State
+   Anchoring (DSA) identifies the target item against the fixed ISG anchor bank,
+   while Hierarchical Path Prediction (HPP) predicts the current and remaining
+   SID codes from every prefix state.
 
-## Method At A Glance
+Inference uses the autoregressive LLM with standard trie-constrained beam
+search. The anchor bank and HPP heads are not used for decoding.
 
-### Stage 1a: SID-text alignment
-
-For every catalog item, Stage 1a creates two views:
-
-- SID view: `<|a_i|> <|b_j|> <|c_k|> <|d_l|> [ITEM]`
-- text view: title, categories, brand, and description
-
-The online branch reads the hidden state at `[ITEM]`; the EMA target branch
-reads the final text token. Only newly added SID embedding rows and the
-predictor are optimized. The released 0.6B configuration uses the raw
-1024-dimensional hidden space, a linear predictor, and cosine distance.
-
-### Stage 1b: point and plan
-
-Stage 1b combines language-model cross entropy with:
-
-- **Point objective:** the history state predicts the fixed Stage 1a SID hidden
-  representation of the next item.
-- **Remaining-plan objective:** the state before each target SID token predicts
-  the current and all remaining RQ-SID levels in the LM-head embedding space.
-
-`point_grad_ratio` and `plan_grad_ratio` are target gradient ratios relative to
-cross entropy, not raw additive loss weights. The trainer calibrates the actual
-weights from the first batch. For Qwen3-0.6B/Beauty they are 0.015 and 0.03.
-
-## Repository Layout
+## Repository structure
 
 ```text
-configs/
-  beauty_0.6b_stage1a.yaml
-  beauty_0.6b_stage1b.yaml
-scripts/
-  check_data.py
-  evaluate.sh
-  run_beauty_0.6b.sh
-urr/
-  data/                       # SID/text and recommendation datasets
-  models/                     # JEPA aligner, projection, predictor, EMA
-  train/stage1a_jepa.py       # Stage 1a training
-  train/build_stage1b_targets.py
-  train/stage1b.py            # point + plan training
-  eval/evaluate.py            # constrained beam generation
-  eval/calc.py                # HR/NDCG calculation
+configs/                 Reference experiment configurations
+data/                    Expected processed-data layout
+data_process/            Optional upstream Amazon-to-GRRM preprocessing code
+sage/
+  data/                  Item views, prompts, and recommendation datasets
+  models/                ISG projection, predictor, and EMA modules
+  train/                 ISG, anchor-bank construction, and GSA trainers
+  eval/                  Constrained decoding and HR/NDCG evaluation
+  utils/                 Shared utilities
+scripts/                 Data checks and end-to-end launchers
+tests/                   Lightweight unit and configuration tests
 ```
+
+Every functional directory contains a short `README.md` describing its role.
 
 ## Installation
 
-Python 3.10 or newer and CUDA-capable PyTorch are required. The reference run
-uses eight 80 GB GPUs, although Qwen3-0.6B can also be trained with fewer GPUs
-after reducing the global batch size in the YAML files.
+The code requires Python 3.10 or newer. Create an isolated environment and
+install the package in editable mode:
 
 ```bash
-git clone <repository-url> KDD27
-cd KDD27
+git clone <anonymous-repository-url> SAGE
+cd SAGE
 python -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install -e .
 ```
 
-PyTorch wheels are platform-specific. Install the correct CUDA build from the
-official PyTorch channel before the remaining requirements when necessary.
+PyTorch wheels are platform-specific. Install the appropriate CUDA build from
+the official PyTorch channel first if the pinned wheel in `requirements.txt`
+does not match the machine.
 
 ## Data
 
-Place the processed Beauty files under `data/Beauty`, or set `DATA_DIR` to an
-existing directory:
+The paper experiments start from the processed data release and do **not** run
+the raw Amazon preprocessing pipeline. Place one dataset under `data/<name>`:
 
 ```text
 data/Beauty/
@@ -91,85 +67,106 @@ data/Beauty/
   Beauty.test.inter
 ```
 
-`Beauty.index.json` maps each item ID to four RQ-SID tokens, with an optional
-fifth collision-resolution token:
-
-```json
-{
-  "item_1": ["<|a_12|>", "<|b_7|>", "<|c_93|>", "<|d_4|>"]
-}
-```
-
-Interaction files are tab-separated and contain a header followed by
-`user_id`, space-separated history IDs, and target item ID. Validate the data
+The three datasets used in the paper are `Beauty`, `Instruments`, and `Sports`.
+See [`data/README.md`](data/README.md) for the file schemas. Validate a dataset
 before training:
 
 ```bash
 python scripts/check_data.py --data_dir data/Beauty --dataset Beauty
 ```
 
-## Complete 0.6B Beauty Run
+The optional [`data_process/`](data_process/) directory retains the upstream
+GRRM preprocessing pipeline for users who need to reconstruct these files from
+raw Amazon data. It is not required to reproduce the SAGE experiments.
 
-The full command trains both stages, builds the fixed target bank, evaluates the
-validation split, and finally evaluates the test split:
+## End-to-end run
+
+The reference configuration uses Qwen3-0.6B on Beauty. `run_sage.sh` performs
+ISG, builds the fixed item-anchor bank, trains GSA, and evaluates both
+validation and test splits:
 
 ```bash
 GPUS=0,1,2,3,4,5,6,7 \
 BASE_MODEL=Qwen/Qwen3-0.6B \
+DATASET=Beauty \
 DATA_DIR="$PWD/data/Beauty" \
-bash scripts/run_beauty_0.6b.sh all
+OUTPUT_ROOT="$PWD/outputs/qwen3_0.6b_beauty" \
+bash scripts/run_sage.sh all
 ```
 
-For a local model checkpoint, set `BASE_MODEL=/path/to/Qwen3-0.6B`. Outputs are
-written to `outputs/qwen3_0.6b_beauty` by default. Each phase is resumable: a
-complete checkpoint, target cache, or metric file is detected and skipped.
-
-Run individual phases when needed:
+Each phase is resumable and can be run separately:
 
 ```bash
-bash scripts/run_beauty_0.6b.sh stage1a
-bash scripts/run_beauty_0.6b.sh targets
-bash scripts/run_beauty_0.6b.sh stage1b
-bash scripts/run_beauty_0.6b.sh valid
-bash scripts/run_beauty_0.6b.sh test
+bash scripts/run_sage.sh check
+bash scripts/run_sage.sh isg
+bash scripts/run_sage.sh anchors
+bash scripts/run_sage.sh gsa
+bash scripts/run_sage.sh valid
+bash scripts/run_sage.sh test
 ```
 
-Inspect the commands without launching training:
+Inspect all commands without launching a model:
 
 ```bash
-DRY_RUN=1 bash scripts/run_beauty_0.6b.sh all
+DRY_RUN=1 bash scripts/run_sage.sh all
 ```
 
-## Selected Hyperparameters
+Use `ISG_CONFIG` and `GSA_CONFIG` to select other configuration files. The
+dataset, model, paths, GPU list, and output directory can be overridden through
+the environment variables shown above.
 
-| Phase | Setting | Value |
+## Reference settings
+
+| Component | Setting | Value |
 |---|---|---:|
-| Stage 1a | representation space | raw hidden (1024) |
-| Stage 1a | predictor / loss | linear / cosine |
-| Stage 1a | learning rate / epochs | 1.5e-3 / 10 |
-| Stage 1a | EMA momentum | 0.999 |
-| Stage 1b | learning rate | 2e-4 |
-| Stage 1b | point gradient ratio | 0.015 |
-| Stage 1b | plan gradient ratio | 0.03 |
-| Stage 1b | plan scope / temperature | remaining / 0.07 |
-| Stage 1b | selected checkpoint | epoch 3 |
-| Evaluation | prompt / beams | train wording / 50 |
+| ISG | representation space | raw hidden space |
+| ISG | predictor / loss | linear / cosine |
+| ISG | learning rate / epochs | 1.5e-3 / 10 |
+| ISG | EMA momentum | 0.999 |
+| GSA | learning rate | 2e-4 |
+| DSA | objective / temperature | catalog CE / 0.07 |
+| DSA | target gradient ratio | 0.010 |
+| HPP | scope / temperature | remaining / 0.07 |
+| HPP | target gradient ratio | 0.03 |
+| Evaluation | beams | 50 |
 
-Stage 1b runs three epochs while retaining the four-epoch cosine scheduler. This
-reproduces the original epoch-3 checkpoint without spending time or disk on the
-unused fourth epoch.
+The gradient ratios are targets relative to the next-token cross-entropy
+gradient at the supervised hidden states. The trainer calibrates the concrete
+auxiliary-loss weights on its first optimization step.
 
 ## Outputs
 
 ```text
 outputs/qwen3_0.6b_beauty/
-  stage1a/aligned_base_model/
-  targets/stage1b_targets.pt
-  stage1b/epoch_3/
+  isg/grounded_model/
+  anchors/item_anchors.pt
+  gsa/epoch_3/
   evaluation/valid_metrics.json
   evaluation/test_metrics.json
 ```
 
-The evaluation is deterministic constrained beam search. Sampling is disabled,
-and model-specific Qwen generation defaults are explicitly prevented from
-overriding the evaluation configuration.
+Generated data, model weights, logs, and experiment-tracking files are excluded
+from version control.
+
+## Testing
+
+```bash
+pip install -e ".[dev]"
+pytest
+ruff check .
+```
+
+The tests cover SID parsing, metric calculation, the released configurations,
+and DSA/HPP forward and gradient diagnostics using a small synthetic model.
+
+## Reproducibility notes
+
+- Random seeds are explicit in the YAML files and evaluation is deterministic.
+- Evaluation uses 50 trie-constrained beams without sampling or auxiliary-head
+  reranking.
+- The reference launcher uses the training prompt wording during evaluation,
+  matching the paper protocol.
+- Raw datasets and pretrained model checkpoints are not redistributed.
+
+This repository is prepared for anonymous review and intentionally contains no
+author or institutional metadata.

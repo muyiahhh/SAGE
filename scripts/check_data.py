@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the processed dataset files expected by the URR pipeline."""
+"""Validate the processed dataset files expected by SAGE."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ SID_PATTERN = re.compile(r"^<\|([a-e])_(\d+)\|>$")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Check an URR dataset directory")
+    parser = argparse.ArgumentParser(description="Check a SAGE dataset directory")
     parser.add_argument("--data_dir", required=True)
     parser.add_argument("--dataset", default="Beauty")
     args = parser.parse_args()

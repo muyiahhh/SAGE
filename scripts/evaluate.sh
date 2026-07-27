@@ -6,7 +6,7 @@ REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 cd "${REPO_ROOT}"
 
 PYTHON="${PYTHON:-python}"
-MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to a Stage 1b checkpoint}"
+MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to a GSA checkpoint}"
 DATA_DIR="${DATA_DIR:?Set DATA_DIR to the processed dataset directory}"
 DATASET="${DATASET:-Beauty}"
 EVAL_SPLIT="${EVAL_SPLIT:-test}"
@@ -58,7 +58,7 @@ echo "Model=${MODEL_PATH} dataset=${DATASET} split=${EVAL_SPLIT} beams=${NUM_BEA
 echo "Prompt=$([[ "${EVAL_PROMPT_STYLE}" == "1" ]] && echo eval || echo train) GPUs=${GPUS}"
 
 if [[ "${N_SHARDS}" -eq 1 ]]; then
-  CUDA_VISIBLE_DEVICES="${GPU_ARRAY[0]}" "${PYTHON}" -m urr.eval.evaluate \
+  CUDA_VISIBLE_DEVICES="${GPU_ARRAY[0]}" "${PYTHON}" -m sage.eval.evaluate \
     "${COMMON_ARGS[@]}" \
     --output_path "${RESULT_JSON}" \
     --local_rank 0
@@ -68,7 +68,7 @@ else
   for ((SHARD = 0; SHARD < N_SHARDS; SHARD++)); do
     SHARD_PATH="${RESULT_BASE}_shard${SHARD}.json"
     SHARD_PATHS+=("${SHARD_PATH}")
-    CUDA_VISIBLE_DEVICES="${GPU_ARRAY[${SHARD}]}" "${PYTHON}" -m urr.eval.evaluate \
+    CUDA_VISIBLE_DEVICES="${GPU_ARRAY[${SHARD}]}" "${PYTHON}" -m sage.eval.evaluate \
       "${COMMON_ARGS[@]}" \
       --output_path "${SHARD_PATH}" \
       --local_rank 0 \
@@ -87,14 +87,14 @@ else
     echo "At least one evaluation shard failed" >&2
     exit 1
   fi
-  "${PYTHON}" -m urr.eval.calc \
+  "${PYTHON}" -m sage.eval.calc \
     --path "${SHARD_PATHS[@]}" \
     --index_path "${DATA_DIR}/${DATASET}.index.json" \
     --merge "${RESULT_JSON}" \
     --merge_only
 fi
 
-"${PYTHON}" -m urr.eval.calc \
+"${PYTHON}" -m sage.eval.calc \
   --path "${RESULT_JSON}" \
   --index_path "${DATA_DIR}/${DATASET}.index.json" \
   --save_path "${METRICS_JSON}"
