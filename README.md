@@ -6,16 +6,17 @@ for SID-based generative recommendation.
 SAGE has two training components:
 
 1. **Item-level Semantic Grounding (ISG)** treats an item's SID sequence and
-   text as two views of the same item. A frozen LLM learns grounded SID-token
-   embeddings through joint-embedding predictive alignment.
-2. **Generation-time Semantic Anchoring (GSA)** fine-tunes the recommender with
-   next-token cross-entropy and two training-only objectives. Decision-State
-   Anchoring (DSA) identifies the target item against the fixed ISG anchor bank,
-   while Hierarchical Path Prediction (HPP) predicts the current and remaining
-   SID codes from every prefix state.
+   text as two views of the same item. With the LLM frozen, only the new SID
+   embeddings and a linear predictor are trained so that the SID view predicts
+   the frozen text view.
+2. **Predictive Semantic Anchoring (PSA)** fine-tunes the recommender with
+   next-token cross-entropy and one shared linear predictor applied to the four
+   SID decoding states. Its semantic readout aligns each prediction with the
+   fixed ISG anchor of the target item, and its identity readout predicts the
+   remaining SID codes against the model's own SID token embeddings.
 
 Inference uses the autoregressive LLM with standard trie-constrained beam
-search. The anchor bank and HPP heads are not used for decoding.
+search. The anchor bank and the PSA predictor are not used for decoding.
 
 ## Repository structure
 
@@ -25,12 +26,11 @@ data/                    Expected processed-data layout
 data_process/            Optional upstream Amazon-to-GRRM preprocessing code
 sage/
   data/                  Item views, prompts, and recommendation datasets
-  models/                ISG projection, predictor, and EMA modules
-  train/                 ISG, anchor-bank construction, and GSA trainers
+  models/                ISG aligner and predictors
+  train/                 ISG, anchor-bank construction, and PSA trainers
   eval/                  Constrained decoding and HR/NDCG evaluation
   utils/                 Shared utilities
 scripts/                 Data checks and end-to-end launchers
-tests/                   Lightweight unit and configuration tests
 ```
 
 Every functional directory contains a short `README.md` describing its role.
@@ -82,7 +82,7 @@ raw Amazon data. It is not required to reproduce the SAGE experiments.
 ## End-to-end run
 
 The reference configuration uses Qwen3-0.6B on Beauty. `run_sage.sh` performs
-ISG, builds the fixed item-anchor bank, trains GSA, and evaluates both
+ISG, builds the fixed item-anchor bank, trains PSA, and evaluates both
 validation and test splits:
 
 ```bash
@@ -100,7 +100,7 @@ Each phase is resumable and can be run separately:
 bash scripts/run_sage.sh check
 bash scripts/run_sage.sh isg
 bash scripts/run_sage.sh anchors
-bash scripts/run_sage.sh gsa
+bash scripts/run_sage.sh psa
 bash scripts/run_sage.sh valid
 bash scripts/run_sage.sh test
 ```
@@ -111,7 +111,7 @@ Inspect all commands without launching a model:
 DRY_RUN=1 bash scripts/run_sage.sh all
 ```
 
-Use `ISG_CONFIG` and `GSA_CONFIG` to select other configuration files. The
+Use `ISG_CONFIG` and `PSA_CONFIG` to select other configuration files. The
 dataset, model, paths, GPU list, and output directory can be overridden through
 the environment variables shown above.
 
@@ -119,20 +119,19 @@ the environment variables shown above.
 
 | Component | Setting | Value |
 |---|---|---:|
-| ISG | representation space | raw hidden space |
-| ISG | predictor / loss | linear / cosine |
+| ISG | trainable parameters | SID embeddings + linear predictor |
+| ISG | text view / loss | frozen LLM last token / cosine |
 | ISG | learning rate / epochs | 1.5e-3 / 10 |
-| ISG | EMA momentum | 0.999 |
-| GSA | learning rate | 2e-4 |
-| DSA | objective / temperature | catalog CE / 0.07 |
-| DSA | target gradient ratio | 0.010 |
-| HPP | scope / temperature | remaining / 0.07 |
-| HPP | target gradient ratio | 0.03 |
+| PSA | learning rate / epochs | 2e-4 / 3 of a 4-epoch schedule |
+| PSA | identity readout scope / temperature | future codes / 0.07 |
+| PSA | semantic gradient ratio | 0.010 |
+| PSA | identity gradient ratio | 0.030 |
 | Evaluation | beams | 50 |
 
 The gradient ratios are targets relative to the next-token cross-entropy
-gradient at the supervised hidden states. The trainer calibrates the concrete
-auxiliary-loss weights on its first optimization step.
+gradient at the decoding states each readout supervises. The trainer calibrates
+the two loss weights on its first optimization step and keeps them fixed. The
+Instruments and Sports values are listed in `configs/beauty_qwen3_0.6b_psa.yaml`.
 
 ## Outputs
 
@@ -140,24 +139,13 @@ auxiliary-loss weights on its first optimization step.
 outputs/qwen3_0.6b_beauty/
   isg/grounded_model/
   anchors/item_anchors.pt
-  gsa/epoch_3/
+  psa/epoch_3/
   evaluation/valid_metrics.json
   evaluation/test_metrics.json
 ```
 
 Generated data, model weights, logs, and experiment-tracking files are excluded
 from version control.
-
-## Testing
-
-```bash
-pip install -e ".[dev]"
-pytest
-ruff check .
-```
-
-The tests cover SID parsing, metric calculation, the released configurations,
-and DSA/HPP forward and gradient diagnostics using a small synthetic model.
 
 ## Reproducibility notes
 

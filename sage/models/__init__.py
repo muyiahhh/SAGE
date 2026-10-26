@@ -1,1 +1,1 @@
-"""ISG representation modules."""
+"""ISG and PSA model components."""

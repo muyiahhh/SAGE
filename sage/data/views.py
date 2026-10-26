@@ -73,7 +73,7 @@ def validate_index_sid_tokens(
             f"{context} contains SID paths that do not tokenize atomically. "
             f"Example item {item_id}: levels={levels}, token_ids={token_ids}, "
             f"encoded={encoded}. Register SID strings as special added tokens and "
-            "rerun ISG and GSA."
+            "rerun ISG and PSA."
         )
 
 
@@ -170,7 +170,7 @@ class ISGViewDataset(Dataset):
         tokenizer: PreTrainedTokenizerBase,
         item_marker: str = "[ITEM]",
         max_text_len: int = 128,
-        max_sid_len: int = 16,
+        max_sid_len: int = 32,
     ):
         self.tokenizer = tokenizer
         self.item_marker = item_marker

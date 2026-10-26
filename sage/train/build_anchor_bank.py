@@ -1,8 +1,9 @@
-"""Build the fixed item-anchor bank used by SAGE GSA.
+"""Build the fixed item-anchor bank used by PSA.
 
-This command encodes every catalog item with the ISG-grounded model and stores
-its SID-based item representation together with the four RQ-SID code indices
-used by DSA and HPP.
+Every catalog item is encoded once with the ISG-grounded model. Its anchor is
+the final hidden state at ``[ITEM]`` after its SID sequence, i.e. the SID view
+of ISG. The bank also stores the four zero-based RQ-SID codes of each item,
+which PSA uses to locate the SID decoding states and as identity-readout labels.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from sage.data.views import build_sid_sequence, lookup_sid_tokens
-from sage.models.isg import ITEM_MARKER, SID_LEVELS
+from sage.models.isg import ITEM_MARKER, SID_LEVELS, build_sid_tokens
 
 
 _SID_RE = re.compile(r"^<\|([a-d])_(\d+)\|>$")
@@ -52,7 +53,7 @@ def encode_sid_hidden(
     max_sid_len: int,
     device: torch.device,
 ) -> torch.Tensor:
-    """Return the final-layer hidden state at the ``[ITEM]`` marker."""
+    """Return the final hidden state of the backbone at the ``[ITEM]`` marker."""
     marker_id = tokenizer.convert_tokens_to_ids(ITEM_MARKER)
     chunks: list[torch.Tensor] = []
     for start in range(0, len(sequences), batch_size):
@@ -70,13 +71,11 @@ def encode_sid_hidden(
         if not bool(marker_mask.any(dim=1).all()):
             raise ValueError("At least one SID sequence lost [ITEM] during tokenization")
         item_position = marker_mask.long().argmax(dim=1)
-        output = model(
+        hidden = model.base_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            output_hidden_states=True,
             use_cache=False,
-        )
-        hidden = output.hidden_states[-1]
+        ).last_hidden_state
         batch_index = torch.arange(hidden.size(0), device=device)
         chunks.append(hidden[batch_index, item_position].float().cpu())
     return torch.cat(chunks, dim=0)
@@ -88,8 +87,8 @@ def main() -> None:
     parser.add_argument("--data_dir", required=True)
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--max_sid_len", type=int, default=16)
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--max_sid_len", type=int, default=32)
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
@@ -99,6 +98,11 @@ def main() -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
+    missing = [token for token in build_sid_tokens() if token not in tokenizer.get_vocab()]
+    if missing:
+        raise ValueError(
+            f"{args.isg_model} is not an ISG checkpoint: {len(missing)} SID tokens missing"
+        )
 
     model = (
         AutoModelForCausalLM.from_pretrained(
@@ -130,28 +134,31 @@ def main() -> None:
         device=device,
     )
     print(
-        "[INFO] SID target statistics: "
+        "[INFO] Anchor statistics: "
         f"dim={sid_hidden.size(1)} "
         f"norm={sid_hidden.norm(dim=-1).mean():.3f}"
     )
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    partial_path = output_path.with_name(output_path.name + ".partial")
     torch.save(
         {
             "item_ids": item_ids,
             "sid_codes": sid_codes.contiguous(),
             "sid_hidden": sid_hidden.contiguous(),
             "meta": {
-                "version": 1,
+                "version": 2,
                 "isg_model": Path(args.isg_model).name,
                 "dataset": args.dataset,
                 "hidden_size": int(model.config.hidden_size),
                 "max_sid_len": int(args.max_sid_len),
+                "space": "hidden",
             },
         },
-        output_path,
+        partial_path,
     )
+    os.replace(partial_path, output_path)
     print(f"[INFO] Saved item-anchor bank -> {output_path}")
 
 

@@ -1,18 +1,18 @@
-"""Joint-embedding predictive alignment used by SAGE ISG.
+"""Item-level Semantic Grounding (ISG).
 
-Architecture:
-  - context_encoder : LLM backbone + SID embedding (frozen backbone, trainable SID rows)
-  - context_proj    : projection or identity mapping (trainable if projected)
-  - predictor       : representation predictor (linear in the released setting)
-  - target_encoder  : EMA copy of (LLM backbone + SID embedding)
-  - target_proj     : EMA copy of context_proj
+ISG treats the SID sequence and the text of an item as two views of the same
+item. The LLM backbone stays frozen and only the newly added SID embedding rows
+and a linear predictor are trained.
 
-During ISG the original LLM parameters are frozen and only newly added SID
-embedding rows plus the representation heads are optimized. GSA loads the
-aligned language model and unfreezes it for recommendation training.
+* SID view:  ``<|a_i|> <|b_j|> <|c_k|> <|d_l|> [<|e_n|>] [ITEM]``. Its
+  representation is the final hidden state at ``[ITEM]``.
+* Text view: ``title: ..., categories: ..., brand: ..., description: ...``. Its
+  representation is the final hidden state at the last token, computed by the
+  same frozen backbone without gradients.
 
-The released Qwen3-0.6B setting works directly in model hidden space and uses
-cosine distance between the predicted SID view and stop-gradient text view.
+The loss is the cosine distance between the predicted SID view and the text
+view, ``mean(1 - cos(g(z_sid), z_text))``. The text view contains no SID tokens,
+so its representation is exactly that of the frozen pretrained LLM.
 """
 
 from __future__ import annotations
@@ -22,26 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from sage.models.projection import ProjectionHead
 from sage.models.predictor import build_predictor
-from sage.utils.ema import build_ema_model, ema_update
-
-
-def jepa_distance(pred: torch.Tensor, target: torch.Tensor, loss_type: str) -> torch.Tensor:
-    """JEPA prediction distance. target must already be stop-gradient'd.
-
-    - "mse"     : F.mse_loss(pred, target)
-    - "cosine"  : mean(1 - cos(pred, target))
-    - "norm_mse": F.mse_loss(normalize(pred), normalize(target))
-    """
-    t = (loss_type or "mse").lower()
-    if t == "mse":
-        return F.mse_loss(pred, target)
-    if t == "cosine":
-        return (1.0 - F.cosine_similarity(pred, target, dim=-1)).mean()
-    if t == "norm_mse":
-        return F.mse_loss(F.normalize(pred, dim=-1), F.normalize(target, dim=-1))
-    raise ValueError(f"Unknown jepa_loss_type: {loss_type!r}")
 
 
 # SID token naming convention used by the data pipeline
@@ -69,14 +50,14 @@ def add_sid_tokens_to_model(
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
     sid_tokens: list[str],
-    init_strategy: str = "normal",
+    init_strategy: str = "mean",
 ) -> tuple[AutoModelForCausalLM, AutoTokenizer, int]:
     """Add SID tokens to the tokenizer and resize the model's embedding table.
 
     ``init_strategy`` controls only newly-added rows:
-      - ``normal`` preserves the original JEPA initialization (N(0, 0.02)).
       - ``mean`` initializes input and untied output rows from the pretrained
-        vocabulary mean.  This is useful for controlled GTI/JEPA comparisons.
+        vocabulary mean (the setting used in the paper).
+      - ``normal`` samples them from N(0, 0.02).
 
     Returns (model, tokenizer, orig_vocab_size).
     """
@@ -91,7 +72,7 @@ def add_sid_tokens_to_model(
     if new_tokens:
         # Qwen tokenizers reserve the <|...|> pattern for special tokens.  Adding
         # SID strings as special added tokens makes adjacent SID strings tokenize
-        # atomically in GSA targets instead of leaking byte/digit pieces.
+        # atomically in recommendation targets instead of leaking byte/digit pieces.
         tokenizer.add_tokens(new_tokens, special_tokens=True)
         model.resize_token_embeddings(len(tokenizer))
 
@@ -105,9 +86,9 @@ def add_sid_tokens_to_model(
                     dtype=emb.weight.dtype, device=emb.weight.device
                 )
 
-                # Qwen variants may use an untied LM head.  Initialize those
-                # new output rows identically so the control does not depend on
-                # Transformers' resize default.
+                # Some backbones use an untied LM head. Initialize those new
+                # output rows identically so the result does not depend on the
+                # Transformers resize default.
                 out_emb = model.get_output_embeddings()
                 if out_emb is not None and out_emb.weight.data_ptr() != emb.weight.data_ptr():
                     out_emb.weight[orig_vocab_size:] = mean_row.to(
@@ -118,21 +99,18 @@ def add_sid_tokens_to_model(
 
 
 def freeze_backbone(model: AutoModelForCausalLM, orig_vocab_size: int) -> None:
-    """Freeze all LLM backbone params; leave newly-added SID embedding rows trainable.
+    """Freeze all LLM parameters except the newly added SID embedding rows.
 
-    We freeze by setting requires_grad=False (NOT by no_grad), so the context-side
-    forward graph still reaches the trainable SID embedding rows.
+    The embedding matrix keeps ``requires_grad=True`` so that the SID view can
+    back-propagate into it. A gradient hook zeroes the rows of the pretrained
+    vocabulary, which therefore never change (their weight decay is zero).
     """
     emb = model.get_input_embeddings()
 
     for param in model.parameters():
         param.requires_grad_(False)
-    # The embedding parameter must require gradients for the new rows. A hook
-    # below masks the pretrained vocabulary rows after backpropagation.
     emb.weight.requires_grad_(True)
 
-    # Register a hook that zeroes gradients for the original vocabulary rows
-    # so only the new SID rows actually receive gradient updates.
     def _zero_old_rows(grad):
         if grad is None:
             return grad
@@ -144,154 +122,76 @@ def freeze_backbone(model: AutoModelForCausalLM, orig_vocab_size: int) -> None:
 
 
 def unfreeze_backbone(model: AutoModelForCausalLM) -> None:
-    """Unfreeze all LLM backbone parameters for GSA."""
+    """Unfreeze all LLM parameters for recommendation fine-tuning."""
     for param in model.parameters():
         param.requires_grad_(True)
 
 
+def gather_hidden(
+    language_model: nn.Module,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    positions: torch.Tensor,
+) -> torch.Tensor:
+    """Final-layer hidden state of the backbone at one position per sequence.
+
+    ``base_model`` returns the normalized last hidden state, which is the input
+    of the LM head. The LM-head logits are not computed.
+    """
+    hidden = language_model.base_model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        use_cache=False,
+    ).last_hidden_state
+    batch_index = torch.arange(hidden.size(0), device=hidden.device)
+    return hidden[batch_index, positions]
+
+
+def cosine_distance(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """``mean(1 - cos(prediction, target))`` computed in float32."""
+    return (1.0 - F.cosine_similarity(prediction.float(), target.float(), dim=-1)).mean()
+
+
 class ISGAligner(nn.Module):
-    """ISG alignment module.
+    """SID-to-text predictive alignment on a frozen LLM.
 
     Parameters
     ----------
-    context_model : LLM backbone (Qwen3-0.6B with SID tokens added)
-    d_model       : hidden dim of the LLM (read from config, never hardcoded)
-    d_proj        : projection dimension, equal to d_model for identity mode
-    ema_tau       : EMA momentum for target encoder (default 0.999)
+    language_model : causal LM with SID tokens added and the backbone frozen
+    hidden_size    : hidden dimension of the LLM
+    predictor_type : predictor g from the SID view to the text view
+                     (``linear`` in the paper)
     """
 
     def __init__(
         self,
-        context_model: nn.Module,
-        d_model: int,
-        d_proj: int = 256,
-        ema_tau: float = 0.999,
-        predictor_type: str = "mlp3",
-        jepa_loss_type: str = "mse",
-        projection_type: str = "linear",
+        language_model: nn.Module,
+        hidden_size: int,
+        predictor_type: str = "linear",
     ):
         super().__init__()
-        self.ema_tau = ema_tau
-        self.jepa_loss_type = jepa_loss_type
-        self.projection_type = str(projection_type).lower()
-        if self.projection_type not in {"linear", "identity"}:
-            raise ValueError("projection_type must be 'linear' or 'identity'")
-        if self.projection_type == "identity" and d_proj != d_model:
-            raise ValueError(
-                f"identity projection requires d_proj == d_model ({d_model}), got {d_proj}"
-            )
-
-        # Context branch (gradients flow through SID embeddings + projection + predictor)
-        self.context_encoder = context_model
-        self.context_proj = (
-            nn.Identity() if self.projection_type == "identity" else ProjectionHead(d_model, d_proj)
-        )
-        self.predictor = build_predictor(predictor_type, d_proj)
-
-        # Target branch (EMA copy; no gradient)
-        self.target_encoder = build_ema_model(context_model)
-        self.target_proj = build_ema_model(self.context_proj)
-
-    # ------------------------------------------------------------------
-    # Encoding helpers
-    # ------------------------------------------------------------------
-
-    def _encode_context(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        item_pos: torch.Tensor,
-    ) -> torch.Tensor:
-        """Run context encoder; extract hidden state at [ITEM] position.
-
-        input_ids     : (B, L)
-        attention_mask: (B, L)
-        item_pos      : (B,)  — index of [ITEM] token in each sequence
-        Returns z_SID : (B, d_proj)
-        """
-        out = self.context_encoder(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-            use_cache=False,
-        )
-        hidden = out.hidden_states[-1]  # (B, L, d_model)
-        # Gather the [ITEM] position for each sample
-        idx = item_pos.unsqueeze(-1).unsqueeze(-1)  # (B, 1, 1)
-        idx = idx.expand(-1, 1, hidden.size(-1))  # (B, 1, d_model)
-        h_item = hidden.gather(1, idx).squeeze(1)  # (B, d_model)
-        z_SID = self.context_proj(h_item)  # (B, d_proj)
-        return z_SID
-
-    @torch.no_grad()
-    def _encode_target(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        eos_pos: torch.Tensor,
-    ) -> torch.Tensor:
-        """Run EMA target encoder; pool at EOS position.
-
-        Returns z_text: (B, d_proj)
-        """
-        out = self.target_encoder(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-            use_cache=False,
-        )
-        hidden = out.hidden_states[-1]  # (B, L, d_model)
-        idx = eos_pos.unsqueeze(-1).unsqueeze(-1)
-        idx = idx.expand(-1, 1, hidden.size(-1))
-        h_eos = hidden.gather(1, idx).squeeze(1)  # (B, d_model)
-        z_text = self.target_proj(h_eos)  # (B, d_proj)
-        return z_text
-
-    # ------------------------------------------------------------------
-    # Loss
-    # ------------------------------------------------------------------
+        self.language_model = language_model
+        self.predictor = build_predictor(predictor_type, hidden_size)
 
     def forward(
         self,
-        # View A: SID sequence
         sid_input_ids: torch.Tensor,
         sid_attention_mask: torch.Tensor,
         item_pos: torch.Tensor,
-        # View B: text description
         text_input_ids: torch.Tensor,
         text_attention_mask: torch.Tensor,
         eos_pos: torch.Tensor,
-        # Optional variance regularization
-        use_var_reg: bool = False,
-        var_reg_weight: float = 0.1,
-    ) -> dict[str, torch.Tensor]:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        # SID view: gradients reach only the SID embedding rows and g.
+        z_sid = gather_hidden(self.language_model, sid_input_ids, sid_attention_mask, item_pos)
+        prediction = self.predictor(z_sid)
 
-        z_SID = self._encode_context(sid_input_ids, sid_attention_mask, item_pos)
-        pred = self.predictor(z_SID)  # (B, d_proj)
+        # Text view: the frozen backbone, stop-gradient target.
+        with torch.no_grad():
+            z_text = gather_hidden(
+                self.language_model, text_input_ids, text_attention_mask, eos_pos
+            )
 
-        z_text = self._encode_target(text_input_ids, text_attention_mask, eos_pos)
-        # stop-gradient on target — NEVER remove this
-        z_text = z_text.detach()
-
-        jepa_loss = jepa_distance(pred, z_text, self.jepa_loss_type)
-
-        loss = jepa_loss
-        log = {"jepa_loss": jepa_loss.detach()}
-
-        if use_var_reg:
-            # Penalize collapsed predictor output: variance < 1 per dimension
-            std = pred.std(dim=0)  # (d_proj,)
-            var_loss = F.relu(1.0 - std).mean()
-            loss = loss + var_reg_weight * var_loss
-            log["var_loss"] = var_loss.detach()
-
-        log["total_jepa"] = loss.detach()
-        return loss, log
-
-    # ------------------------------------------------------------------
-    # EMA step — call after every optimizer step during ISG
-    # ------------------------------------------------------------------
-
-    def update_ema(self) -> None:
-        ema_update(self.context_encoder, self.target_encoder, tau=self.ema_tau)
-        ema_update(self.context_proj, self.target_proj, tau=self.ema_tau)
+        loss = cosine_distance(prediction, z_text.detach())
+        logs = {"isg_loss": loss.detach()}
+        return loss, logs

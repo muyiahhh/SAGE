@@ -16,12 +16,12 @@ MASTER_PORT="${MASTER_PORT:-29500}"
 DRY_RUN="${DRY_RUN:-0}"
 
 ISG_CONFIG="${ISG_CONFIG:-${REPO_ROOT}/configs/beauty_qwen3_0.6b_isg.yaml}"
-GSA_CONFIG="${GSA_CONFIG:-${REPO_ROOT}/configs/beauty_qwen3_0.6b_gsa.yaml}"
+PSA_CONFIG="${PSA_CONFIG:-${REPO_ROOT}/configs/beauty_qwen3_0.6b_psa.yaml}"
 ISG_DIR="${OUTPUT_ROOT}/isg"
 ISG_MODEL="${ISG_DIR}/grounded_model"
 ANCHOR_CACHE="${OUTPUT_ROOT}/anchors/item_anchors.pt"
-GSA_DIR="${OUTPUT_ROOT}/gsa"
-GSA_MODEL="${GSA_DIR}/epoch_3"
+PSA_DIR="${OUTPUT_ROOT}/psa"
+PSA_MODEL="${PSA_DIR}/epoch_3"
 
 IFS=',' read -r -a GPU_ARRAY <<< "${GPUS}"
 NPROC="${NPROC:-${#GPU_ARRAY[@]}}"
@@ -88,9 +88,9 @@ build_anchors() {
     --device cuda:0
 }
 
-run_gsa() {
-  if is_checkpoint "${GSA_MODEL}"; then
-    echo "[resume] GSA checkpoint: ${GSA_MODEL}"
+run_psa() {
+  if is_checkpoint "${PSA_MODEL}"; then
+    echo "[resume] PSA checkpoint: ${PSA_MODEL}"
     return
   fi
   if [[ "${DRY_RUN}" != "1" && ! -s "${ANCHOR_CACHE}" ]]; then
@@ -100,24 +100,24 @@ run_gsa() {
   run env CUDA_VISIBLE_DEVICES="${GPUS}" "${PYTHON}" -m torch.distributed.run \
     --nproc_per_node="${NPROC}" \
     --master_port="$((MASTER_PORT + 1))" \
-    -m sage.train.gsa \
-    --config "${GSA_CONFIG}" \
+    -m sage.train.psa \
+    --config "${PSA_CONFIG}" \
     --grounded_model "${ISG_MODEL}" \
     --anchor_cache "${ANCHOR_CACHE}" \
     --dataset "${DATASET}" \
     --data_dir "${DATA_DIR}" \
-    --output_dir "${GSA_DIR}"
+    --output_dir "${PSA_DIR}"
 }
 
 run_eval() {
   local split="$1"
-  if [[ "${DRY_RUN}" != "1" ]] && ! is_checkpoint "${GSA_MODEL}"; then
-    echo "Missing GSA checkpoint: ${GSA_MODEL}" >&2
+  if [[ "${DRY_RUN}" != "1" ]] && ! is_checkpoint "${PSA_MODEL}"; then
+    echo "Missing PSA checkpoint: ${PSA_MODEL}" >&2
     exit 1
   fi
   run env \
     PYTHON="${PYTHON}" \
-    MODEL_PATH="${GSA_MODEL}" \
+    MODEL_PATH="${PSA_MODEL}" \
     DATA_DIR="${DATA_DIR}" \
     DATASET="${DATASET}" \
     EVAL_SPLIT="${split}" \
@@ -132,18 +132,18 @@ case "${MODE}" in
     check_data
     run_isg
     build_anchors
-    run_gsa
+    run_psa
     run_eval valid
     run_eval test
     ;;
   check) check_data ;;
   isg) check_data; run_isg ;;
   anchors) build_anchors ;;
-  gsa) run_gsa ;;
+  psa) run_psa ;;
   valid) run_eval valid ;;
   test) run_eval test ;;
   *)
-    echo "Usage: $0 [all|check|isg|anchors|gsa|valid|test]" >&2
+    echo "Usage: $0 [all|check|isg|anchors|psa|valid|test]" >&2
     exit 2
     ;;
 esac

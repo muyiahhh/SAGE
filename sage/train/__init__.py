@@ -1,1 +1,1 @@
-"""ISG and GSA training entry points."""
+"""ISG, anchor-bank and PSA training entry points."""

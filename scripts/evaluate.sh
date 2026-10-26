@@ -6,7 +6,7 @@ REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 cd "${REPO_ROOT}"
 
 PYTHON="${PYTHON:-python}"
-MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to a GSA checkpoint}"
+MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to a PSA checkpoint}"
 DATA_DIR="${DATA_DIR:?Set DATA_DIR to the processed dataset directory}"
 DATASET="${DATASET:-Beauty}"
 EVAL_SPLIT="${EVAL_SPLIT:-test}"

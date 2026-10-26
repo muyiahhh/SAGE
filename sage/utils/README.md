@@ -1,4 +1,3 @@
 # Utilities
 
-This directory currently contains exponential moving-average helpers for the
-ISG target encoder.
+`checkpoint.py` stages checkpoints locally and publishes them atomically.
