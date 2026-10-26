@@ -6,8 +6,7 @@ This directory preserves the data-preparation code.
 
 The scripts in this directory originate from the upstream data pipeline rather
 than the SAGE method. They are kept separate from the `sage` Python package and
-have their own optional dependencies. Before public redistribution, retain the
-upstream attribution and confirm that its license permits inclusion.
+have their own optional dependencies.
 
 Some later steps synthesize preferences or reasoning traces through an OpenAI-
 compatible remote or local model endpoint. These steps are not needed by SAGE,
